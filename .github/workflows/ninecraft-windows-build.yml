@@ -18,7 +18,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
+      
+    - name: Install glad build dependencies
+      run: pip install -r glad/requirements.txt
+        
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
