@@ -1,4 +1,82 @@
 #include <ninecraft/gfx/gles_compat.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+/* MCPE's GL ES shader source uses ESSL-only syntax (`precision mediump
+ * float;` and friends). Apple/NVIDIA/AMDGPU-PRO tend to compile this fine
+ * under a desktop GL 2.0 compatibility context, but stricter compilers
+ * (notably Mesa's radeonsi/GLSL front end, common on cheap AMD APU
+ * laptops) reject the `precision` qualifier outright and fail the
+ * compile. If MCPE's own glGetShaderiv/glGetProgramiv error-checking
+ * doesn't surface that failure visibly, the symptom is: whatever geometry
+ * that shader draws silently never appears, while anything still drawn
+ * via the legacy fixed-function path (e.g. a title-screen panorama) does.
+ *
+ * We defensively comment out `precision ... ;` statements before handing
+ * the source to the driver. This is a no-op on drivers that already
+ * accepted the qualifier, and unblocks the ones that don't. */
+static char *strip_precision_qualifiers(const char *src) {
+    size_t len = strlen(src);
+    char *out = (char *)malloc(len + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, src, len + 1);
+
+    for (size_t i = 0; i < len; ) {
+        /* look for a `precision` token at a statement boundary */
+        if ((i == 0 || out[i - 1] == '\n' || isspace((unsigned char)out[i - 1])) &&
+            strncmp(out + i, "precision", 9) == 0 &&
+            (i + 9 == len || isspace((unsigned char)out[i + 9]))) {
+            size_t j = i;
+            while (j < len && out[j] != ';') {
+                if (out[j] != '\n') {
+                    out[j] = ' ';
+                }
+                ++j;
+            }
+            if (j < len) {
+                out[j] = ' '; /* blank the trailing ';' too */
+            }
+            i = j + 1;
+        } else {
+            ++i;
+        }
+    }
+    return out;
+}
+
+static void check_shader_compile(GLuint shader) {
+    GLint status = GL_TRUE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+    if (status == GL_FALSE) {
+        GLint log_len = 0;
+        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_len);
+        char *log = (char *)malloc((size_t)log_len + 1);
+        if (log) {
+            glGetShaderInfoLog(shader, log_len, NULL, log);
+            fprintf(stderr, "[ninecraft] shader %u failed to compile:\n%s\n", shader, log);
+            free(log);
+        }
+    }
+}
+
+static void check_program_link(GLuint program) {
+    GLint status = GL_TRUE;
+    glGetProgramiv(program, GL_LINK_STATUS, &status);
+    if (status == GL_FALSE) {
+        GLint log_len = 0;
+        glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
+        char *log = (char *)malloc((size_t)log_len + 1);
+        if (log) {
+            glGetProgramInfoLog(program, log_len, NULL, log);
+            fprintf(stderr, "[ninecraft] program %u failed to link:\n%s\n", program, log);
+            free(log);
+        }
+    }
+}
 
 FLOAT_ABI_FIX void gl_alpha_func(GLenum func, GLclampf ref) {
     glAlphaFunc(func, ref);
@@ -246,6 +324,7 @@ void gl_clear_stencil(GLint s) {
 
 void gl_compile_shader(GLuint shader) {
     glCompileShader(shader);
+    check_shader_compile(shader);
 }
 
 GLuint gl_create_program() {
@@ -302,6 +381,7 @@ GLint gl_get_uniform_location(GLuint program, const GLchar *name) {
 
 void gl_link_program(GLuint program) {
     glLinkProgram(program);
+    check_program_link(program);
 }
 
 void gl_release_shader_compiler() {
@@ -309,7 +389,29 @@ void gl_release_shader_compiler() {
 }
 
 void gl_shader_source(GLuint shader, GLsizei count, const GLchar *const *string, const GLint *length) {
-    glShaderSource(shader, count, string, length);
+    char **stripped = (char **)malloc(sizeof(char *) * (size_t)count);
+    if (!stripped) {
+        glShaderSource(shader, count, string, length);
+        return;
+    }
+    for (GLsizei i = 0; i < count; ++i) {
+        stripped[i] = strip_precision_qualifiers(string[i]);
+        if (!stripped[i]) {
+            /* allocation failed partway through: fall back to the
+             * original, unmodified source for this call */
+            for (GLsizei k = 0; k < i; ++k) {
+                free(stripped[k]);
+            }
+            free(stripped);
+            glShaderSource(shader, count, string, length);
+            return;
+        }
+    }
+    glShaderSource(shader, count, (const GLchar *const *)stripped, length);
+    for (GLsizei i = 0; i < count; ++i) {
+        free(stripped[i]);
+    }
+    free(stripped);
 }
 
 FLOAT_ABI_FIX void gl_uniform_1_f_v(GLint location, GLsizei count, const GLfloat *value) {
