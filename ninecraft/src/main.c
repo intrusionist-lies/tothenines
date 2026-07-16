@@ -1519,6 +1519,16 @@ int main(int argc, char **argv) {
 
     gladLoadGL((GLADloadfunc)SDL_GL_GetProcAddress);
 
+    /* Without this, the render loop below has no sync point and will
+     * spin as fast as the CPU/driver allow (visible as pegged CPU usage
+     * even sitting idle at the title screen). Try adaptive vsync first,
+     * then fall back to standard vsync if the driver doesn't support it. */
+    if (SDL_GL_SetSwapInterval(-1) < 0) {
+        if (SDL_GL_SetSwapInterval(1) < 0) {
+            printf("Warning: vsync could not be enabled: %s\n", SDL_GetError());
+        }
+    }
+
     audio_engine_init();
 
     gles_hook();
